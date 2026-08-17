@@ -1,0 +1,84 @@
+import json
+import boto3
+import urllib.parse
+from datetime import datetime
+
+s3 = boto3.client(‘s3’)
+rekognition = boto3.client(‘rekognition’)
+dynamodb = boto3.resource(‘dynamodb’)
+sns = boto3.client(‘sns’)
+
+import os
+
+TABLE_NAME = os.environ[‘TABLE_NAME’]
+SNS_TOPIC_ARN = os.environ[‘SNS_TOPIC_ARN’]
+
+def lambda_handler(event, context):
+print(“Received event:”, json.dumps(event))
+
+bucket = event[‘Records’][0][‘s3’][‘bucket’][‘name’]
+image_name = urllib.parse.unquote_plus(event[‘Records’][0][‘s3’][‘object’][‘key’])
+
+print(f”Processing image: {image_name} from bucket: {bucket}”)
+
+response = rekognition.detect_moderation_labels(
+Image={
+‘S3Object’: {
+‘Bucket’: bucket,
+‘Name’: image_name
+}
+},
+MinConfidence=70
+)
+
+moderation_labels = response[‘ModerationLabels’]
+
+if moderation_labels:
+status = “REJECTED”
+labels = [label[‘Name’] for label in moderation_labels]
+confidence = max([label[‘Confidence’] for label in moderation_labels])
+
+message = f”””
+Unsafe image detected!
+
+Image Name: {image_name}
+Bucket: {bucket}
+Status: {status}
+Detected Labels: {‘, ‘.join(labels)}
+Confidence: {confidence:.2f}%
+“””
+
+sns.publish(
+TopicArn=SNS_TOPIC_ARN,
+Subject=”Image Moderation Alert”,
+Message=message
+)
+
+else:
+status = “APPROVED”
+labels = []
+confidence = 0
+
+table = dynamodb.Table(TABLE_NAME)
+
+table.put_item(
+Item={
+‘image_name’: image_name,
+‘bucket_name’: bucket,
+‘status’: status,
+‘labels’: ‘, ‘.join(labels),
+‘confidence’: str(round(confidence, 2)),
+‘processed_time’: datetime.utcnow().isoformat()
+}
+)
+
+print(f”Image moderation completed. Status: {status}”)
+
+return {
+‘statusCode’: 200,
+‘body’: json.dumps({
+‘image_name’: image_name,
+‘status’: status,
+‘labels’: labels
+})
+}
